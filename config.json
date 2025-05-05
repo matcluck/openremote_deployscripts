@@ -1,0 +1,9 @@
+{
+    "OR_HOSTNAME": "localhost",
+    "OR_SSL_PORT": "443",
+    "OR_EMAIL_ADMIN": "admin@mydomain.com",
+    "OR_METRICS_ENABLED": "true",
+    "OR_DEV_MODE": "false",
+    "OR_ADMIN_PASSWORD" : "secret",
+    "KEYCLOAK_ADMIN_PASSWORD": ""
+}
