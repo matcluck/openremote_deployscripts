@@ -6,6 +6,7 @@ import io
 import argparse
 import logging
 import time
+import subprocess
 
 # Setup logging
 logging.basicConfig(
@@ -166,6 +167,22 @@ def main():
 
     copy_backup_to_container(container, backup_file)
     restore_database(container, backup_file, env)
+
+    commands = [
+        ["docker", "restart", "openremote-keycloak-1"],
+        ["docker", "restart", "openremote-manager-1"]
+    ]
+
+    # Run each command and wait for it to complete
+    for cmd in commands:
+        try:
+            print(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print("Output:", result.stdout.strip())
+        except subprocess.CalledProcessError as e:
+            print(f"Error running command: {' '.join(cmd)}")
+            print("Error output:", e.stderr.strip())
+            break
 
 if __name__ == "__main__":
     main()
