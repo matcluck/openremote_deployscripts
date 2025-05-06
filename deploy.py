@@ -111,7 +111,7 @@ def prompt_to_remove_stack():
     response = input("Docker Compose stack appears to be running. Do you want to stop and remove it before deploying a new stack? (y/N): ").strip().lower()
     if response == 'y':
         print("Removing existing Docker Compose stack...")
-        subprocess.run(["docker-compose", "-p", "openremote", "-f", DOCKER_COMPOSE_FILE, "down"], check=True)
+        subprocess.run(["docker-compose", "-p", "openremote", "-f", DOCKER_COMPOSE_FILE, "down", "-v"], check=True)
     else:
         print("Exiting without making changes.")
         sys.exit(0)
@@ -119,7 +119,11 @@ def prompt_to_remove_stack():
 
 def start_docker_compose():
     print("Bringing up Docker Compose stack...")
-    subprocess.run(["docker-compose", "-p", "openremote", "-f", DOCKER_COMPOSE_FILE, "up", "-d"], check=True)
+    subprocess.run(
+    ["docker-compose", "-p", "openremote", "-f", DOCKER_COMPOSE_FILE, "up", "-d"],
+    check=True,
+    env=os.environ.copy()  # <--- pass full environment from Python
+)
 
 
 def wait_for_containers():
@@ -129,7 +133,7 @@ def wait_for_containers():
 
 def run_post_deployment_script():
     print("Running post-deployment tasks...")
-    subprocess.run(["python", PYTHON_RESTORE_SCRIPT], check=True)
+    subprocess.run([sys.executable, PYTHON_RESTORE_SCRIPT], check=True)
     print("Post-deployment tasks completed.")
 
 

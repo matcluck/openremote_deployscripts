@@ -5,5 +5,5 @@
     "OR_METRICS_ENABLED": "true",
     "OR_DEV_MODE": "false",
     "OR_ADMIN_PASSWORD" : "secret",
-    "KEYCLOAK_ADMIN_PASSWORD": ""
+    "KEYCLOAK_ADMIN_PASSWORD": "secret"
 }

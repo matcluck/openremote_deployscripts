@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import time
+import subprocess
 
 def find_postgres_containers():
     """
@@ -40,17 +41,22 @@ def display_container_menu(containers):
         print("Please enter a valid number.")
         return None
 
+def copy_from_container(container_name, container_path, host_path):
+    subprocess.run([
+        "docker", "cp",
+        f"{container_name}:{container_path}",
+        host_path
+    ], check=True)
 
-def backup_postgres_container(container_name, dbname, user, password, tables, backup_file):
+def backup_postgres_container(container_name, dbname, user, password, backup_file):
     """
-    Back up specific tables from the PostgreSQL container.
+    Back up the entire PostgreSQL database.
     """
     client = docker.from_env()  # Connect to Docker engine
     container = client.containers.get(container_name)
 
-    # Construct the pg_dump command for the specified tables
-    table_args = " ".join([f"-t {table}" for table in tables])
-    dump_command = f"pg_dump -U {user} -d {dbname} {table_args} -f /tmp/{backup_file}"
+    # Construct the pg_dump command for the entire database
+    dump_command = f"pg_dump -U {user} -d {dbname} -Fc -f /tmp/{backup_file}"
 
     # Set environment variables for password
     env = {"PGPASSWORD": password}
@@ -59,11 +65,7 @@ def backup_postgres_container(container_name, dbname, user, password, tables, ba
     container.exec_run(dump_command, environment=env)
 
     # Copy the backup file from the container to the host
-    with open(backup_file, 'wb') as f:
-        bits, _ = container.get_archive(f"/tmp/{backup_file}")
-        for chunk in bits:
-            f.write(chunk)
-
+    copy_from_container(container_name,f"/tmp/{backup_file}",backup_file)
     print(f"Backup completed and saved to {backup_file}")
 
 
@@ -91,32 +93,9 @@ def parse_arguments():
     """
     Parse command-line arguments.
     """
-    parser = argparse.ArgumentParser(description="Backup PostgreSQL tables")
+    parser = argparse.ArgumentParser(description="Backup PostgreSQL database")
     parser.add_argument('--container', type=str, help='Name or ID of the container to back up from')
     return parser.parse_args()
-
-
-# List of tables to back up
-tables = [
-    "openremote.alarm",
-    "openremote.alarm_asset_link",
-    "openremote.asset",
-    "openremote.asset_datapoint",
-    "openremote.asset_predicted_datapoint",
-    "openremote.asset_ruleset",
-    "openremote.dashboard",
-    "openremote.flyway_schema_history",
-    "openremote.gateway_connection",
-    "openremote.global_ruleset",
-    "openremote.notification",
-    "openremote.provisioning_config",
-    "openremote.realm_ruleset",
-    "openremote.spatial_ref_sys",
-    "openremote.syslog_event",
-    "openremote.user_asset_link",
-    "topology.layer",
-    "topology.topology"
-]
 
 
 def main():
@@ -142,9 +121,9 @@ def main():
         user = env_vars.get("POSTGRES_USER", "postgres")
         password = env_vars.get("POSTGRES_PASSWORD", "")
         
-        # Perform backup (back up specified tables)
-        backup_file = f"{str(int(time.time()))}-openremote.sql"
-        backup_postgres_container(container_name, dbname, user, password, tables, backup_file)
+        # Perform backup (back up the entire database)
+        backup_file = f"{str(int(time.time()))}-openremote.bak"
+        backup_postgres_container(container_name, dbname, user, password, backup_file)
         
     else:
         print("No PostgreSQL container selected. Exiting.")

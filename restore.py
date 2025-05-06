@@ -1,156 +1,171 @@
 import docker
 import os
 import sys
+import tarfile
+import io
 import argparse
+import logging
+import time
+
+# Setup logging
+logging.basicConfig(
+    filename=f"{str(int(time.time()))}-restore.log",
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+def log(message):
+    print(message)
+    logging.info(message)
+
+def log_error(message):
+    print(message, file=sys.stderr)
+    logging.error(message)
+
+def log_output(result):
+    stdout = result.output[0].decode() if result.output[0] else ''
+    stderr = result.output[1].decode() if result.output[1] else ''
+
+    if stdout:
+        log("STDOUT:\n" + stdout)
+    if stderr:
+        log_error("STDERR:\n" + stderr)
+
+    if result.exit_code != 0:
+        log_error(f"Command failed with exit code {result.exit_code}")
 
 def find_postgres_containers():
-    """
-    Find all PostgreSQL containers that have 'postgres' in their name.
-    """
-    client = docker.from_env()  # Connect to Docker engine
+    client = docker.from_env()
     containers = client.containers.list(all=True)
-    
-    # Filter containers that have 'postgres' in their name
-    postgres_containers = [container for container in containers if 'postgres' in container.name]
-
-    return postgres_containers
-
+    return [c for c in containers if 'postgres' in c.name]
 
 def display_container_menu(containers):
-    """
-    Display a menu of available containers to choose from.
-    """
     if not containers:
-        print("No PostgreSQL containers found.")
+        log("No PostgreSQL containers found.")
         return None
-
-    print("Select the PostgreSQL container to restore the OpenRemote DB backup to:")
+    log("Select the PostgreSQL container:")
     for i, container in enumerate(containers):
         print(f"{i + 1}. {container.name}")
-    
     try:
         selection = int(input(f"Enter a number (1-{len(containers)}): "))
         if 1 <= selection <= len(containers):
             return containers[selection - 1].name
-        else:
-            print("Invalid selection.")
-            return None
     except ValueError:
-        print("Please enter a valid number.")
-        return None
-
+        pass
+    log_error("Invalid selection.")
+    return None
 
 def display_backup_file_menu():
-    """
-    Display a menu to select a backup file from the current directory.
-    """
-    print("Select a backup file:")
-    backup_files = [f for f in os.listdir('.') if f.endswith('.sql')]
-    
-    if not backup_files:
-        print("No .sql backup files found.")
+    files = [f for f in os.listdir('.') if f.endswith('.bak')]
+    if not files:
+        log("No .bak backup files found.")
         return None
-
-    for i, backup_file in enumerate(backup_files):
-        print(f"{i + 1}. {backup_file}")
-
+    log("Select a backup file:")
+    for i, f in enumerate(files):
+        print(f"{i + 1}. {f}")
     try:
-        selection = int(input(f"Enter a number (1-{len(backup_files)}): "))
-        if 1 <= selection <= len(backup_files):
-            return backup_files[selection - 1]
-        else:
-            print("Invalid selection.")
-            return None
+        selection = int(input(f"Enter a number (1-{len(files)}): "))
+        if 1 <= selection <= len(files):
+            return files[selection - 1]
     except ValueError:
-        print("Please enter a valid number.")
-        return None
+        pass
+    log_error("Invalid selection.")
+    return None
 
-
-def restore_postgres_container(container_name, dbname, user, password, backup_file):
-    """
-    Restore a backup to the PostgreSQL container.
-    """
-    client = docker.from_env()  # Connect to Docker engine
-    container = client.containers.get(container_name)
-
-    # Copy the backup file into the container
+def copy_backup_to_container(container, backup_file):
+    log(f"Copying backup file '{backup_file}' to container...")
     with open(backup_file, 'rb') as f:
-        container.put_archive('/tmp', f)
+        data = f.read()
+    file_tarstream = io.BytesIO()
+    with tarfile.open(fileobj=file_tarstream, mode='w') as tar:
+        tarinfo = tarfile.TarInfo(name=os.path.basename(backup_file))
+        tarinfo.size = len(data)
+        tar.addfile(tarinfo, io.BytesIO(data))
+    file_tarstream.seek(0)
+    container.put_archive('/tmp', file_tarstream)
+    log("Backup file copied to /tmp inside container.")
 
-    # Set environment variables for password
-    env = {"PGPASSWORD": password}
-    
-    # Restore the database from the backup
-    container.exec_run(f"psql -U {user} -d {dbname} -f /tmp/{backup_file}", environment=env)
+def run_psql(container, cmd, env):
+    log(f"Running SQL command: {cmd}")
+    result = container.exec_run(f"psql -U postgres -d openremote -c \"{cmd}\"", environment=env, demux=True)
+    log_output(result)
+    return result
 
-    print(f"Restore completed from {backup_file}")
-
-
-def get_postgres_env_variables(container_name):
+def disconnect_all_connections(container):
+    log("Disconnecting all active connections to the 'openremote' database...")
+    disconnect_sql = """
+        SELECT pg_terminate_backend(pid)
+        FROM pg_stat_activity
+        WHERE datname = 'openremote' AND pid <> pg_backend_pid();
     """
-    Retrieve PostgreSQL environment variables from the specified container.
-    """
-    client = docker.from_env()
-    container = client.containers.get(container_name)
-    
-    # Fetch the container's environment variables (if available)
+    result = run_psql(container, disconnect_sql, {})
+    if result.exit_code != 0:
+        log_error("Failed to disconnect all active connections.")
+    else:
+        log("All active connections disconnected.")
+
+def restore_database(container, backup_file, env):
+    disconnect_all_connections(container)
+
+    log("Dropping existing 'openremote' database...")
+    drop_result = container.exec_run("dropdb openremote", environment=env, demux=True)
+    log_output(drop_result)
+
+    log("Creating new 'openremote' database...")
+    create_result = container.exec_run("createdb openremote", environment=env, demux=True)
+    log_output(create_result)
+
+    run_psql(container, "CREATE EXTENSION IF NOT EXISTS postgis;", env)
+    run_psql(container, "CREATE EXTENSION IF NOT EXISTS timescaledb;", env)
+    run_psql(container, "SELECT timescaledb_pre_restore();", env)
+
+    log("Running pg_restore...")
+    result = container.exec_run(
+        f"pg_restore -Fc --verbose -U postgres -d openremote /tmp/{os.path.basename(backup_file)}",
+        environment=env,
+        demux=True
+    )
+    log_output(result)
+
+    run_psql(container, "SELECT timescaledb_post_restore();", env)
+
+    if result.exit_code != 0:
+        log_error("Restore failed.")
+    else:
+        log("Database restored successfully.")
+
+def get_postgres_env(container):
     env_vars = container.attrs['Config']['Env']
-    
-    # Find specific environment variables related to PostgreSQL
-    postgres_env = {}
-    for var in env_vars:
-        if var.startswith("POSTGRES_"):
-            key, value = var.split("=", 1)
-            postgres_env[key] = value
-            
-    return postgres_env
-
+    return {e.split('=')[0]: e.split('=')[1] for e in env_vars if '=' in e and e.startswith("POSTGRES_")}
 
 def parse_arguments():
-    """
-    Parse command-line arguments.
-    """
-    parser = argparse.ArgumentParser(description="Restore PostgreSQL backup")
-    parser.add_argument('--container', type=str, help='Name of the container to restore to')
-    parser.add_argument('--backup', type=str, help='Backup file to restore from')
+    parser = argparse.ArgumentParser(description="Restore OpenRemote PostgreSQL DB")
+    parser.add_argument('--container', help='PostgreSQL Docker container name')
+    parser.add_argument('--backup', help='Path to .bak backup file')
     return parser.parse_args()
 
-
 def main():
-    # Parse command line arguments
     args = parse_arguments()
+    container_name = args.container or display_container_menu(find_postgres_containers())
+    backup_file = args.backup or display_backup_file_menu()
 
-    # If no container or backup file is provided via arguments, interactively prompt the user
-    container_name = args.container or None
-    backup_file = args.backup or None
+    if not container_name or not backup_file:
+        log_error("Both container and backup file are required.")
+        return
 
-    if not backup_file:
-        # Display the backup file menu if needed
-        backup_file = display_backup_file_menu()
+    client = docker.from_env()
+    container = client.containers.get(container_name)
+    env_vars = get_postgres_env(container)
+    password = env_vars.get("POSTGRES_PASSWORD", "")
 
-    if not container_name:
-        # Find all PostgreSQL containers
-        containers = find_postgres_containers()
+    env = {"PGPASSWORD": password}
 
-        # Display the container menu if needed
-        container_name = display_container_menu(containers)    
+    log(f"Using container: {container_name}")
+    log(f"Using backup file: {backup_file}")
 
-    if container_name and backup_file:
-        print(f"Selected container: {container_name}")
-        print(f"Selected backup file: {backup_file}")
-        
-        # Retrieve environment variables from the PostgreSQL container
-        env_vars = get_postgres_env_variables(container_name)
-        dbname = env_vars.get("POSTGRES_DB", "postgres")
-        user = env_vars.get("POSTGRES_USER", "postgres")
-        password = env_vars.get("POSTGRES_PASSWORD", "")
-        
-        # Perform restore from the backup file
-        restore_postgres_container(container_name, dbname, user, password, backup_file)
-        
-    else:
-        print("Either container or backup file was not selected. Exiting.")
-
+    copy_backup_to_container(container, backup_file)
+    restore_database(container, backup_file, env)
 
 if __name__ == "__main__":
     main()
